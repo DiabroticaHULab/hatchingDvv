@@ -1,0 +1,981 @@
+---
+title: "On understanding and manipulating the hatching patterns of Diabrotica v. virgifera (Coleoptera: Chrysomelidae) eggs to improve the design of experiments"
+subtitle: "Extended  analysis report"
+author: "Dr. Mark Szalai and Szabolcs Toth"
+date: "2021"
+output: 
+  html_document:
+    toc: TRUE
+    toc_depth: 4
+---
+
+
+```{r report_setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.width = 10)
+```
+
+
+```{r pckgs, include=FALSE}
+
+#install.packages("ggplot2")
+#install.packages("ggpubr")
+#install.packages("dplyr")
+#install.packages("multcomp")
+#install.packages("gridextra")
+#install.packages("mgcv")
+#install.packages('scico')
+
+
+library(ggplot2)
+library(ggpubr)
+library(dplyr)
+library(multcomp)
+library(gridExtra)
+library(mgcv)
+library(scico) # palette for the colorful graphs, https://github.com/thomasp85/scico
+```
+
+
+# 1. Data wrangling 
+
+## 1.1. Import and clean the dataset
+
+Get and set working directory. Drop accidental coercion of 3 invalid column from end of the .csv file. Remove empty rows from the end (NA for `Case`) and remove the "filler" rows with no real data as `Date_check`: NA.
+
+```{r import_&na_removal}
+#getwd()
+#setwd()
+datadiapause <- read.csv("Dvv_EggHatching_CleanedRawData_ZenodoSub.csv", header=T, na.strings=c("","NA"))
+datadiapause <- datadiapause[,-c(31:33)]
+datadiap <- datadiapause[!is.na(datadiapause$Case) & !is.na(datadiapause$Date_check),]
+```
+
+Eggs from laboratory reared CSE (not wild collected and reared!) later on proved to be low quality (ie. lack of hatching), thus removed form the analysis
+
+```{r}
+datadiap <- datadiap[!(datadiap$EggOrigin == "CSE" & 
+                           datadiap$Field_Lab_eggs == "Lab"),]
+```
+
+
+## 1.2. Creating categories for different diapause length
+
+Please note that the category names will be different in the data visualization part. Separate CSE eggs which are spent 0 month in diapuse from Non-diapause eggs which is also spent 0 months in diapause.~ 3 months intervals, expect special cases.
+
+```{r category_selection}
+categories <- 
+  c("ND","0","0.5 to 1.5m","2 to 4m","5 to 7m","8 to 10m", 
+    "11 to 13m", "14 to 16m", "17m or more")
+ideal <- "8 to 10m"
+MonCatBreaks <- c(0, 0.1, 1.6, 4.5, 7.5, 10.5, 13.5, 16, Inf)
+
+datadiap$DiapMonCat <-     #make categories according to the diap length
+  as.character(cut(datadiap$DiapMonths,
+      breaks = MonCatBreaks, 
+      labels = categories[-1], #minus ND!
+      right = FALSE))
+
+datadiap$DiapMonCat <- ifelse (datadiap$EggOrigin == "ND",   # add NDs to separate one (special case of 0 months in diap.)
+                                     "ND", datadiap$DiapMonCat)
+
+datadiap$DiapMonCat <- ordered(datadiap$DiapMonCat, 
+                                   levels = categories)
+```
+
+
+## 1.3. Create "traytable" as a helper table
+
+Have a summary table of the trays to use for later summaries and data aggregation. Renaming datadiap0 to datadiap.
+
+
+```{r traytable}
+traytable <- unique(dplyr::select(datadiap, 
+                                  ExpSeries : TempC, DiapMonCat, -LaidUntil))
+```
+
+
+# 2. Data aggregation and selection
+
+## 2.1. Calculating hatch ratio, hatching -start, -end, -duration and -peak
+
+1. hatch start: the first day (min of Days_aft_diastop) when Larvae_hatched above 0  
+2. hatch end: the last day (max of Days_aft_diastop) when Larvae_hatched above 0  
+3. hatch duration: hatchend - hatchstart + 1  
+4. hatch peak: the first(!) day (Days_aft_diastop) when Larvae_hatched is the max (BUT if no hatch at all, it should be NA, not 0)  
+5. hatch ratio: total hatch number per alive eggs (in %)  
+6. hatchsum = sum(Larvae_hatched)  
+
+Use of the helper traytable and create hatchtable, thus Every CASE_TRAY_dish_No in one row.
+
+```{r create_hatchtable}
+hatchtable <- 
+  summarise(group_by(datadiap, CASE_Tray_dish_No),
+            hatchstart = Days_aft_diastop[min(which(Larvae_hatched >= 1))],
+            hatchend = Days_aft_diastop[max(which(Larvae_hatched >= 1))],
+            hatchduration = hatchend - hatchstart + 1,
+            hatchpeak = ifelse(all(Larvae_hatched == 0),
+                               NA, Days_aft_diastop[which.max(Larvae_hatched)]),
+            hatchratio = 100 * sum(Larvae_hatched) / mean(EggsAlive),
+            hatchsum = sum(Larvae_hatched))
+
+hatchtable <- merge(hatchtable, traytable)
+```
+
+
+## 2.2. Trays with very low number of hatched larvae
+
+```{r low_hatch, echo=FALSE}
+# How many trays do we have below 1, 2, 3...10 hatched larvae (for the different DiapMonCat categories)? *In percentages of total trays*
+
+lapply(1:10, function(x){
+   y <- table(hatchtable$hatchsum < x, hatchtable$DiapMonCat)
+   round(100 * y[2,] / colSums(y))
+ })  
+
+```
+
+## 2.3. Final data tables
+
+Re-naming hatchtable to hatchtable0
+
+```{r ?}
+hatchtable0 <- hatchtable 
+
+identical(hatchtable0, hatchtable)
+
+```
+
+## 2.4. Dealing with low hatched larvae numbers
+
+For further analysis it has been decided for petri dishes (column: CASE_tray_dish_No) which led to lower than 6 living larvae are not involved anymore in data visualization and mean calculations in case of: hatchstart, hatchend, hatchduration. Still involved in hatchingpeak and hatching ratio calculations. 
+
+```{r low_hatch_decision}
+
+hatchtable$hatchstart[hatchtable$hatchsum < 6] <- NA
+hatchtable$hatchend[hatchtable$hatchsum < 6] <- NA
+hatchtable$hatchduration[hatchtable$hatchsum < 6] <- NA
+```
+
+
+## 2.5. ND data visualization at the aggregated dish level
+
+ND eggs were use as a reference point thus there data aggregating 4 petri dish data from the two original main dishes (Column: DishNo) was done for data visualization purposes.
+
+```{r ND_visual}
+hatchtable4 <- summarise_at(group_by(hatchtable,
+                                     DishNo, Exp_ID, TempC), 
+                            vars(starts_with("hatch")),
+                            mean, na.rm = TRUE)
+hatchtable4 <- merge(hatchtable4, 
+                     unique(dplyr::select(traytable,
+                                          -(CASE_Tray_dish_No : EggsDead))))
+
+# to have single value for each temperature level for ND
+hatchtable4ND <- summarise_at(group_by(filter(hatchtable, EggOrigin == "ND"),
+                                         TempC, DiapMonths), 
+                            vars(starts_with("hatch")),
+                            mean, na.rm = TRUE)
+
+```
+
+
+# 3. Data visualization and statistical analysis
+
+## 3.1. Outsourcing repetitive elements for exploratory data visialization
+
+### 3.1.1 Style elements for the exploratory graphs
+
+```{r}
+#general x scale for diap time spent in months
+scalebreakx <- c(0,2,4,6,8,10,12,14,16,18,20,22,24,26,28) 
+
+#reusable style template
+
+styleFigX = list(scale_x_continuous(breaks = scalebreakx),
+             scale_color_manual(labels = c("  16 C°", "  20 C°", "  24 C°")), #C° sometimes not visible
+             scale_linetype_manual(values=c("solid", "twodash" ,"dotted")),  
+   theme(
+         text = element_text(size = 34, family = "arial"),
+         panel.background = element_rect(fill = NA),
+         panel.grid.major = element_line(colour = "grey80"),
+         axis.title.y = element_text(margin = margin(r = +20)),
+         axis.title.x = element_text(margin = margin(t = +20)), 
+         panel.border = element_rect(color = "black", fill = NA, size = 1),
+         axis.text.x = element_text(size = 28),
+         legend.key.width = unit(1.5, "cm"),
+         legend.key.height = unit(1, "cm")),
+    labs(x ="Months spent in diapause",
+         color = ""), #y-scale title is not formatted
+   ylim(0,170))
+```
+
+
+### 3.1.2 Function for graphs creation for CSE and ND eggs visualization
+
+Treylevelplot: calling it shows every petri dish as a point within the different incubation temperature regimes of the called diapause pattern variable. ND data overlayed as geom_point.
+
+```{r plotfunction_nd_points}
+
+treylevelplot <- function(y){
+  yq <- enquo(y)
+  ggplot(filter(hatchtable, EggOrigin == "CSE"),
+         aes(DiapMonths, !!yq)) +
+    geom_point(aes(shape = as.factor(TempC)), size = 4, position=position_jitter(width=.8))  +
+    geom_smooth(aes(linetype = as.factor(TempC)),size = 2.2 ,se = FALSE, color = "red") +
+    styleFigX 
+ }
+
+NDpoint <- geom_point(data = hatchtable4ND, 
+                      shape = 18, size = 12, color = "blue", show.legend = FALSE) # blue, rhombus shape for ND points
+```
+
+## 3.2. Hatching start
+
+### 3.2.1. Hatching start visualization
+
+```{r hatchstart_vis.}
+treylevelplot(hatchstart) + NDpoint
+```
+
+### 3.2.2. Hatching start statistics
+
+```{r factor_temperature}
+
+#temperature categories as factors conversion
+
+hatchtable$TempCf <- as.factor(hatchtable$TempC)
+```
+
+First part will be only focus on CSE eggs, thus ND eggs temporarily removed and created hatchtableNoND.
+
+```{r nd_temp_removal}
+hatchtableNoND <- hatchtable[hatchtable$EggOrigin == "CSE",]
+```
+
+The general response of the hatching start was affected by the the different time length spent in diapause and the different incubation temperatures.
+
+```{r general_effects_hstart}
+gamhs <- mgcv::gam(hatchstart ~ s(DiapMonths) + TempCf-1, 
+                   data = hatchtableNoND)
+
+anova(gamhs)
+# plot(gamhs)
+# mgcv::gam.check(gamhs)
+```
+
+Pairwise comparison of the used incubation temperatures the they are indeed differently affect the hatching start
+
+```{r inc_temp_hstart}
+multgamhs <- glht(gamhs, linfct = c('TempCf16 - TempCf20 == 0',
+                                    'TempCf16 - TempCf24 == 0',
+                                    'TempCf20 - TempCf24 == 0'))
+summary(multgamhs)
+confint(multgamhs)$confint
+```
+
+ModelDiap creation: A function created for the pairwise comparisons of the different length CSE categories within the corresponding incubation temperature (not between them!). 1. F statistics and compact letter display format between the categories. 2. Estimate, Std. Error, t-values and p-values above for all category comparisons. 
+
+```{r main_model_comparisons}
+ModelDiap <- function(response, temperature){
+  df <- hatchtable[hatchtable$TempC == temperature & 
+                     hatchtable$EggOrigin == "CSE",] #temporary dataframe: df created
+  formula0 <- as.formula(paste(response, "~ DiapMonCat"))
+  model0 <- lm(formula0, data = df)
+  cat("F statistics", "\n")
+  print(summary(model0)$fstatistic)
+  multmodel <- glht(model0, linfct = mcp(DiapMonCat = "Tukey"))
+  CLD <- cld(multmodel)
+  cat("All pairwise comparisons, with compact letter display", "\n")
+  print(CLD)
+  print(summary(multmodel))
+  cldDF <- data.frame(TempC = temperature,
+                      DiapMonCat = names(CLD$mcletters$Letters),
+                      cld = as.character(CLD$mcletters$Letters))
+  names(cldDF)[3] <- paste0(response, "CLD")
+  cldDF
+}
+```
+
+First, for the 24C incubated CSE eggs
+
+```{r hstart_model_24}
+hatchstart24cld <- ModelDiap("hatchstart", 24) 
+```
+
+Second, for the lowest, 16C incubated CSE eggs
+
+```{r hstart_model_16}
+hatchstart16cld <- ModelDiap("hatchstart", 16)
+```
+
+Third, for the 20C incubated CSE eggs
+
+```{r hstart_model_20}
+hatchstart20cld <-ModelDiap("hatchstart", 20)
+```
+
+The significance letters has been saved to a list (hatchstartcld) to later add to the big summary table. See section 4.
+
+```{r hstart_stat_saved}
+hatchstartcld <- 
+  do.call(rbind, list(hatchstart16cld, hatchstart20cld, hatchstart24cld))
+```
+
+Table (hatchtableforND) and model (NDcomp) model creation to compare the ideal (8-10 months) CSE category eggs and the CSE eggs with no-diapause (0 months) and the ND category at 24C. It can be changed to 16 or 20 if necessary, see the comment. Similarly to the CSE egg category comparisons CLD format was used.   
+
+```{r with_ND_comparison_model_start}
+hatchtableforND <-  hatchtable[(hatchtable$DiapMonths == 0 |
+                    hatchtable$DiapMonCat == ideal) &
+                    hatchtable$TempC == 24,] #the TempC can be changed to 16 or 20 to further information
+
+NDcomp <- function(response){
+  formula0 <- as.formula(paste(response, "~ DiapMonCat"))
+  model0 <- lm(formula0, data = hatchtableforND)
+  multmodel <- glht(model0, linfct = mcp(DiapMonCat = "Tukey"))
+  CLD <- cld(multmodel)
+  #cat("Pairwise comparisons, with compact letter display", "\n")
+  print(CLD)
+  print(summary(multmodel))
+}
+
+NDcomp("hatchstart") #run the model
+```
+
+*special note: the same models and approaches will be used in the next segments for the hatching peak, end and duration. Models will be remained, in case of information needed please revise the hatching start section (3.2.)*
+
+## 3.3. Hatching peak
+
+### 3.3.1. Hatching peak visualization
+
+```{r hatchpeak_vis.}
+treylevelplot(hatchpeak) + NDpoint
+```
+
+### 3.3.2. Hatching peak statistics
+
+The general response of the hatching peak was affected by the the different time length spent in diapause and the different incubation temperatures.
+
+```{r general_effects_hpeak}
+gamhp <- mgcv::gam(hatchpeak ~ s(DiapMonths) + TempCf -1, 
+                   data = hatchtableNoND)
+
+anova(gamhp)
+# plot(gamhp)
+# mgcv::gam.check(gamhp)
+
+multgamhp <- glht(gamhp, linfct =c('TempCf16 - TempCf20 == 0',
+                                   'TempCf16 - TempCf24 == 0',
+                                   'TempCf20 - TempCf24 == 0'))
+summary(multgamhp)
+confint(multgamhp)$confint
+```
+
+The pairwise comparisons of the different length CSE categories within the corresponding incubation temperature (not between them!) for hatching peak. 1. F statistics and compact letter display format between the categories. 2. Estimate, Std. Error, t-values and p-values above for all categories comparisons.
+
+First, for the 24C incubated CSE eggs
+
+```{r hpeak_model_24}
+hatchpeak24cld <- ModelDiap("hatchpeak", 24) 
+```
+
+Second, for the lowest, 16C incubated CSE eggs
+
+```{r hpeak_model_16}
+hatchpeak16cld <-ModelDiap("hatchpeak", 16)
+```
+
+Third, for the 20C incubated CSE eggs
+
+```{r hpeak_model_20}
+hatchpeak20cld <-ModelDiap("hatchpeak", 20)
+```
+
+The significance letters has been saved to a list (hatchpeakcld) to later add to the big summary table. See section 4.
+
+```{r hpeak_stat_saved}
+hatchpeakcld <- 
+  do.call(rbind, list(hatchpeak16cld, hatchpeak20cld, hatchpeak24cld))
+```
+
+Comparisons of the hatching peak of the ND, 8-10 months CSE and 0 months spent in diapause CSE eggs at 24C. To change 16 or 20 C please go back to the line 330 at the part of hatchtableforND creation, and change it for an other one and run the model with the code again. 
+
+```{r with_ND_comparison_model_peak}
+NDcomp("hatchpeak")
+```
+
+
+## 3.4. Hatching end
+
+### 3.4.1. Hatch end visualization
+
+```{r hatchend_vis.}
+treylevelplot(hatchstart) + NDpoint
+```
+
+### 3.4.2. Hatch end statistics
+
+The general response of the hatching end was affected by the the different time length spent in diapause and the different incubation temperatures.
+
+```{r general_effects_hend}
+gamhe <- mgcv::gam(hatchend ~ s(DiapMonths) + TempCf -1, 
+                   data = hatchtableNoND)
+
+anova(gamhe)
+# plot(gamhe)
+# mgcv::gam.check(gamhe)
+
+multgamhe <- glht(gamhe, linfct =c('TempCf16 - TempCf20 == 0',
+                                   'TempCf16 - TempCf24 == 0',
+                                   'TempCf20 - TempCf24 == 0'))
+summary(multgamhe)
+confint(multgamhe)$confint
+```
+
+The pairwise comparisons of the different length CSE categories within the corresponding incubation temperature (not between them!) for hatching end. 1. F statistics and compact letter display format between the categories. 2. Estimate, Std. Error, t-values and p-values above for all categories comparisons.
+
+First, for the 24C incubated CSE eggs
+
+```{r hend_model_24}
+hatchend24cld <- ModelDiap("hatchend", 24) 
+```
+
+Second, for the lowest, 16C incubated CSE eggs
+ 
+```{r hend_model_16}
+hatchend16cld <- ModelDiap("hatchend", 16)
+```
+ 
+Third, for the 20C incubated CSE eggs
+
+```{r hend_model_20}
+hatchend20cld <- ModelDiap("hatchend", 20)
+```
+
+The significance letters has been saved to a list (hatchendcld) to later add to the big summary table. See section 4.
+
+```{r hend_stat_saved}
+hatchendcld <- 
+  do.call(rbind, list(hatchend16cld, hatchend20cld, hatchend24cld))
+```
+
+Comparisons of the hatching end of the ND, 8-10 months CSE and 0 months spent in diapause CSE eggs at 24C. To change 16 or 20 C please go back to the line 330 at the part of hatchtableforND creation, and change it for an other one and run the model with the code again. 
+
+```{r with_ND_comparison_model_end}
+NDcomp("hatchend")
+```
+
+
+## 3.5. Hatching duration
+
+### 3.5.1. Hatch duration visualization
+
+```{r hatchdur_vis.}
+treylevelplot(hatchduration) + NDpoint
+```
+
+### 3.5.2. Hatching duration stat
+
+The general response of the hatching duration was affected by the the different time length spent in diapause and the different incubation temperatures.
+
+```{r general_effects_hdur}
+gamhd <- mgcv::gam(hatchduration ~ s(DiapMonths) + TempCf -1, 
+                   data = hatchtableNoND)
+
+anova(gamhd)
+# plot(gamhd)
+# mgcv::gam.check(gamhd)
+
+multgamhd <- glht(gamhd, linfct =c('TempCf16 - TempCf20 == 0',
+                                   'TempCf16 - TempCf24 == 0',
+                                   'TempCf20 - TempCf24 == 0'))
+summary(multgamhd)
+confint(multgamhd)$confint
+```
+
+The pairwise comparisons of the different length CSE categories within the corresponding incubation temperature (not between them!) for hatching duration. 1. F statistics and compact letter display format between the categories. 2. Estimate, Std. Error, t-values and p-values above for all categories comparisons.
+
+First, for the 24C incubated CSE eggs
+
+```{r hdur_model_24}
+hatchduration24cld <- ModelDiap("hatchduration", 24) 
+```
+
+Second, for the lowest, 16C incubated CSE eggs
+
+```{r hdur_model_16}
+hatchduration16cld <-ModelDiap("hatchduration", 16)
+```
+
+Third, for the 20C incubated CSE eggs
+
+```{r hdur_model_20}
+hatchduration20cld <-ModelDiap("hatchduration", 20)
+```
+
+The significance letters has been saved to a list (hatchdurationcld) to later add to the big summary table. See section 4.
+
+```{r hdur_stat_saved}
+hatchdurationcld <- 
+  do.call(rbind, list(hatchduration16cld, hatchduration20cld, hatchduration24cld))
+```
+
+Comparisons of the hatching duration of the ND, 8-10 months CSE and 0 months spent in diapause CSE eggs at 24C. To change 16 or 20 C please go back to the line 330 at the part of hatchtableforND creation, and change it for an other one and run the model with the code again. 
+
+```{r with_ND_comparison_model_duration}
+NDcomp("hatchduration")
+```
+
+
+## 3.6. Hatching percentage
+
+*please note that at the data assessment phase the hatching percentage was coded as "hatching ratio". We kept that phrase, besides that later it has been changed
+
+### 3.6.1. Hatch percentage visualization
+
+```{r hatchperc_vis.}
+treylevelplot(hatchratio) + NDpoint
+```
+
+### 3.6.2. Hatch percentage statistics
+
+The general response of the hatching percentages was affected by the the different time length spent in diapause and the different incubation temperatures.
+
+```{r general_effects_hperc}
+gamhr <- mgcv::gam(hatchratio ~ s(DiapMonths) + TempCf -1, 
+                   data = hatchtableNoND)
+
+anova(gamhr)
+# plot(gamhr)
+# mgcv::gam.check(gamhr)
+
+multgamhr <- glht(gamhr, linfct =c('TempCf16 - TempCf20 == 0',
+                                   'TempCf16 - TempCf24 == 0',
+                                   'TempCf20 - TempCf24 == 0'))
+summary(multgamhr)
+confint(multgamhr)$confint
+```
+
+The pairwise comparisons of the different length CSE categories within the corresponding incubation temperature (not between them!) for hatching percentages. 1. F statistics and compact letter display format between the categories. 2. Estimate, Std. Error, t-values and p-values above for all categories comparisons.
+
+First, for the 24C incubated CSE eggs
+
+```{r hperc_model_24}
+hatchratio24cld <- ModelDiap("hatchratio", 24) 
+```
+
+Second, for the lowest, 16C incubated CSE eggs
+
+```{r hperc_model_16}
+hatchratio16cld <-ModelDiap("hatchratio", 16)
+```
+
+Third, for the 20C incubated CSE eggs
+
+```{r hperc_model_20}
+hatchratio20cld <-ModelDiap("hatchratio", 20)
+```
+
+The significance letters has been saved to a list
+(hatchratiocld) to later add to the big summary table. 
+See section 4.
+
+```{r hdperc_stat_saved}
+hatchratiocld <- 
+  do.call(rbind, list(hatchratio16cld, hatchratio20cld, hatchratio24cld))
+```
+
+Comparisons of the hatching percentages of the ND, 8-10 months CSE and 0 months spent in diapause CSE eggs at 24C. To change 16 or 20 C please go back to the line 330 at the part of hatchtableforND creation, and change it for an other one and run the model with the code again. 
+
+```{r with_ND_comparison_model_percentage}
+NDcomp("hatchratio")
+```
+
+
+## 3.7. Overwinter survival
+
+### 3.7.1. Data visualization of the overwintering survival
+
+Here we did to attempt to visualize the hypothesis as more time spent in diapause the ratio of eggs alive vs. total eggs is decreasing (more eggs dead after dia. months). As we can see here, it the data is very scattered as from 0 days up to 10 months, but after a while (more than 12 months ) will be only visible on the trend line. 
+
+```{r ovewin_summary_vis(colorful)}
+
+#adding Overwintsurvival to traytable
+traytable$OverwintSurv <- 
+  traytable$EggsAlive / (traytable$EggsAlive + traytable$EggsDead)
+
+#small summary table created: survdata (pls note that the catergories created under the name of Diapmonths are differ from MonCatBreaks which used in the other part of the anlysis)
+survdata <- summarise(group_by(traytable, DiapMonCat, EggOrigin),
+                      OverwintSurvAvg = mean(OverwintSurv),
+                      OverwintSurvSD = sd(OverwintSurv))
+survdata$DiapMonths <- c(0,0,1,3,6,9,12,15,21.5)
+
+#data visulasation (plotOverWinter)  
+pOW <- ggplot(traytable, 
+            aes(DiapMonths - (EggOrigin == "ND") * .2, OverwintSurv,
+                shape = EggOrigin)) +
+  geom_point(aes(col = DiapMonCat), size = 2.5) + 
+  scale_x_continuous(breaks = scalebreakx) + 
+  scale_y_continuous(labels = scales::percent_format(),
+                     breaks = c(0, 0.25, 0.50, 0.75 , 1.0)) +
+  scale_color_manual(values = scico(9, begin = 0.1, palette = "vik")) +
+  theme(
+        text = element_text(size = 18, face = "bold", family = "serif"),
+        panel.background = element_rect(fill = NA),
+        panel.grid.major = element_line(colour = "grey80"),
+        axis.title.y = element_text(margin = margin(r = +20)),
+        axis.title.x = element_text(margin = margin(t = +20)), 
+        panel.border = element_rect(color = "black", fill = NA, size = 1)) +
+   labs(x ="Months spend in diapause",
+        y = "Overwinter survival percentages",
+        color = "") +
+  expand_limits(y = 0)
+
+#two smoothed lines adding for above and below 16 months categories
+pOW + geom_smooth(data = filter(traytable, DiapMonths > 0), col = "black")
+pOW + geom_smooth(data = filter(traytable, DiapMonths > 16),
+                method = "lm", col = "black") +
+  geom_smooth(data = filter(traytable, DiapMonths > 0 & DiapMonths < 16 ), 
+              method = "lm", col = "black")
+```
+
+
+### 3.7.2. Overwintering survival statistics
+
+Proving that below 16 months the dipause length has no effect on the overwintering survival (see trend line in the above section) while above 16 months there is a decreasing trend (also, see trend line in the previous section). 
+First, separating the data and fit two linear regressions.
+
+```{r_ovewin_long_short_models}
+modshort <- lm(OverwintSurv ~ DiapMonths, 
+               data = traytable[traytable$DiapMonths < 16,])
+summary(modshort)
+
+
+modlong<- lm(OverwintSurv ~ DiapMonths, 
+               data = traytable[traytable$DiapMonths > 16,])
+summary(modlong)
+```
+
+More detailed, pairwise comparisons of the different categories if they differ or not from the longest (17m or more) dipause spent eggs
+
+```{r ovewin_detailed_pairwise}
+dfOver <- traytable[traytable$DiapMonths != 0,] #ND data is not involved
+modhs <- lm(OverwintSurv ~ DiapMonCat, dfOver)
+multmodhs <- glht(modhs, linfct = mcp(DiapMonCat = "Tukey"))
+cld(multmodhs)
+summary(multmodhs)
+confint(multmodhs)$confint
+```
+
+
+# 4. Main, summary table
+
+## 4.1. Means and sds
+
+Using all tray data (as replicates), taking all data within a category and incubation temperature and take the mean and sd. Hatchtablesum has been created for that.
+
+
+```{r summary_table_mean_sd}
+hatchtablesum <- summarise_at(group_by(hatchtable,
+                                     TempC, DiapMonCat), 
+                            vars(starts_with("hatch")),
+                            list(mean = mean, sd = sd), na.rm = TRUE) 
+
+Nhelper <- summarise(group_by(hatchtable, TempC, DiapMonCat), 
+                     nDish = n(),
+                     nEgg = sum(EggsAlive, na.rm = TRUE),
+                     eggPerDish = mean(EggsAlive, na.rm = TRUE))
+  
+hatchtablesum <- merge(hatchtablesum, Nhelper, sort = FALSE)
+
+hatchtablesum[, -(1:2)] <- round(hatchtablesum[, -(1:2)])
+
+hatchtablesum <- 
+  within(hatchtablesum,{
+    Hatchratio <- 
+      paste(hatchratio_mean, hatchratio_sd, sep = " ± ")
+    Hatchduration <- 
+      paste(hatchduration_mean, hatchduration_sd, sep = " ± ")
+    Hatchend <- 
+      paste(hatchend_mean, hatchend_sd, sep = " ± ")
+    Hatchpeak <- 
+      paste(hatchpeak_mean, hatchpeak_sd, sep = " ± ")
+    Hatchstart <- 
+      paste(hatchstart_mean, hatchstart_sd, sep = " ± ")
+    })
+
+
+hatchtablesum <- dplyr::select(hatchtablesum, 
+                        -starts_with("hatch", ignore.case = FALSE))
+
+knitr::kable(hatchtablesum, align = "c") #knitting together
+```
+
+Please note that a, this table later on took out from here and altered and shaped in Excel (final format different in the article) b, the CV values later added in Excel, no code for that here! d, separator symbol could be not visible or wrong after running the code and saving the graph or knitting the document to html or pdf
+
+## 4.2. Attach significance letters
+
+Significance letters gathered to one table summary. Pls note that these letters added later manually to the main summary table in Excel.
+
+```{r summary_table_clds}
+knitr::kable(Reduce(function(x, y) merge(x, y, sort = FALSE), 
+                    list(hatchstartcld, 
+                         hatchpeakcld, 
+                         hatchendcld, 
+                         hatchdurationcld, 
+                         hatchratiocld)), 
+             align = "c")
+```
+
+
+# 5. Graphs for the publication
+
+Please note, that the following figures could be different from the one's which finally published due to the alternations asked by the publisher! This is especially true for the width and height and quality of the images in the published material. All of the following graphs (expect Figure 1.) has been already created and used for the exploratory analysis in the previous parts.
+
+## 5.1. Figure 1.
+
+```{r adjusting_100eggs/larvae}
+#introducing new variable to adjust larvae hatched per 100 healthy looking eggs for figure 1.
+datadiap$Prop_Larvae_hatched <- datadiap$Larvae_hatched / datadiap$Sum_hatched
+datadiap$Cumulative_Prop_Larvae_hatched <- 
+datadiap$Accumulative_larvae_hatched / datadiap$Sum_hatched
+datadiap$LarvaeHatched100 <- 100 * datadiap$Larvae_hatched / datadiap$EggsAlive
+```
+
+### 5.1.1. VersionA
+
+Colorful, original color palette, bw theme
+
+```{r fig1versA}
+ggplot(datadiap, 
+       aes(Days_aft_diastop, LarvaeHatched100, color = as.factor(TempC))) + 
+  #geom_point() + no geom point
+  geom_smooth(size = 1.5, se = FALSE) +
+  facet_wrap(~DiapMonCat) +
+  coord_cartesian(ylim = c(0, 22.5)) +
+  theme_bw()
+```
+
+### 5.1.2. VersionB
+
+Colorful, 'vik' color palette, renamed labels, special label
+
+```{r fig1versB}
+#relabelling the category names
+labelsForDiapmonthcats <- c('ND' = "Non-diapause strain", '0' = "0 month", '0.5 to 1.5m' = "0.5 to 1.5 months", '2 to 4m' = "2 to 4 months", '5 to 7m' = "5 to 7 months", '8 to 10m' = "8 to 10 months", '11 to 13m' = "11 to 13 months", '14 to 16m' = "14 to 16 months", '17m or more' = "17 or more months" )
+
+#special label for the ideal, 8 to 10 months category
+labelNDL <- data.frame(Days_aft_diastop = 142,
+                       LarvaeHatched100 = 20,
+                       DiapMonCat = "8 to 10m",
+                       label = "Natural Diapause Length")
+
+ggplot(datadiap, 
+       aes(Days_aft_diastop, LarvaeHatched100)) + 
+  geom_smooth(aes(color = as.factor(TempC)), size = 1.5, se = FALSE) +
+  facet_wrap(~DiapMonCat, labeller = labeller(DiapMonCat = labelsForDiapmonthcats)) +
+  coord_cartesian(ylim = c(0, 22.5)) +
+  labs(
+    x ="Days after diapause stopped",
+    y = "Hatched larvae per 100 overwintered eggs",
+    color = ""
+  ) +
+  #theme_bw(base_size = 22) +
+   theme(legend.title = element_blank(),
+         text = element_text(size = 36, face = "bold", family = "arial"),
+        strip.background = element_rect(colour = "black", fill = "grey90"),
+         panel.background = element_rect(fill = NA),
+         panel.grid.major = element_line(colour = "grey80"),
+         panel.grid.minor = element_line(color = "grey70"),
+         axis.title.y = element_text(margin = margin(r = +20)),
+         axis.title.x = element_text(margin = margin(t = +20)), 
+         axis.text.x = element_text(size = 12),
+         panel.border = element_rect(color = "black", fill = NA, size = 1)
+   ) +
+  scale_color_manual(values = scico(3, begin = 0.1, palette = "vik"), labels = c(
+    "  16 °C", "  20 °C", "  24 °C"
+  )) + 
+  scale_x_continuous(#minor_breaks = seq(0 , 300, 14), 
+  breaks = seq(0, 300, 14)) +
+  geom_label(data = labelNDL, aes(label = label), 
+             size = 5) 
+```
+
+### 5.1.3. VersionC
+
+Black and white, 'vik' color palette, renamed labels
+
+```{r fig1versC}
+labelsForDiapmonthcats <- c('ND' = "Non-diapause strain", '0' = "0 month", '0.5 to 1.5m' = "0.5 to 1.5 months", '2 to 4m' = "2 to 4 months", '5 to 7m' = "5 to 7 months", '8 to 10m' = "8 to 10 months", '11 to 13m' = "11 to 13 months", '14 to 16m' = "14 to 16 months", '17m or more' = "17 or more months" )
+
+ggplot(datadiap, 
+       aes(Days_aft_diastop, LarvaeHatched100, color = as.factor(TempC))) + 
+  geom_smooth(size = 1.5, se = FALSE) +
+  facet_wrap(~DiapMonCat, labeller = labeller(DiapMonCat = labelsForDiapmonthcats)) +
+  coord_cartesian(ylim = c(0, 22.5),
+                  xlim = c(0, 200)) +
+  labs(
+           x ="Days after diapause stopped",
+           y = "Hatched larvae per 100 overwintered eggs",
+           color = ""
+          ) +
+  theme(legend.title = element_blank(),
+        text = element_text(size = 25, face = "bold", family = "serif"),
+        strip.background = element_rect(colour = "black", fill = "grey90"),
+        panel.background = element_rect(fill = NA),
+        panel.grid.major = element_line(colour = "grey80"),
+        axis.title.y = element_text(margin = margin(r = +20)),
+        axis.title.x = element_text(margin = margin(t = +20)), 
+        axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+        panel.border = element_rect(color = "black", fill = NA, size = 1)
+        ) +
+ scale_color_manual(values = scico(3, begin = 0.1, palette = "grayC"), labels = c(
+  "  16 C°", "  20 C°", "  24 C°"
+ )) + 
+scale_x_continuous(breaks = seq(0,300, by = 7))
+#ggsave("Fig1.jpg", width = 66, height = 33, units = c("cm")) #optional dimensions for saving out the image
+```
+
+### 5.1.4. VersionD
+
+This version follows the requirements of the Entomologia experimentalis et applicata journal. Black and white, renamed labels, printable.
+
+```{r fig1versD}
+labelsForDiapmonthcats <- c('ND' = "Non-diapause strain", '0' = "0 month", '0.5 to 1.5m' = "0.5 to 1.5 months", '2 to 4m' = "2 to 4 months", '5 to 7m' = "5 to 7 months", '8 to 10m' = "8 to 10 months", '11 to 13m' = "11 to 13 months", '14 to 16m' = "14 to 16 months", '17m or more' = "17 or more months" )
+
+labelNDL <- data.frame(Days_aft_diastop = 142,
+                       LarvaeHatched100 = 20,
+                       DiapMonCat = "8 to 10m",
+                       label = "Natural Diapause Length")
+
+ggplot(datadiap, 
+       aes(Days_aft_diastop, LarvaeHatched100)) + 
+  geom_smooth(aes(linetype = as.factor(TempC)), size = 2.2, se = FALSE, color = "black") +
+  facet_wrap(~DiapMonCat, labeller = labeller(DiapMonCat = labelsForDiapmonthcats)) +
+  coord_cartesian(ylim = c(0, 22.5)) +
+  labs(
+    x ="Post-diapause incubation(days)",
+    y = "Hatched larvae/100 overwintered eggs"
+  ) +
+  theme(
+    text = element_text(size = 36, family = "arial"),
+    axis.title.y = element_text(margin = margin(r = +20)),
+    strip.background = element_rect(colour = "black", fill = "white"),
+    panel.background = element_rect(fill = NA),
+    panel.grid.major = element_line(colour = "grey80"),
+    panel.border = element_rect(color = "black", fill = NA, size = 0.5),
+    axis.text.x = element_text(size = 24, angle = 90, vjust = 0.5, hjust=1),
+    legend.title=element_blank(),
+    axis.title.x = element_text(margin = margin(t = +20)),
+    legend.key.width = unit(1.5, "cm"),
+    legend.key.height = unit(1, "cm")) +  
+  scale_x_continuous(breaks = seq(0, 300, 14)) +
+  #geom_label(data = labelNDL, aes(label = label), 
+   #          size = 8) +
+  scale_linetype_manual(values=c("solid", "twodash" ,"dotted"))
+#ggsave("Fig1.jpg", width = 50, height = 26, units = c("cm")) #optional dimensions for saving out the image
+```
+
+
+## 5.2. Figure 2.
+
+4 subplot (hatching peak, start, duration and end) to one - ggarange method - for publication, printable and bw. Please note that in the publication the lines and the rhombus shapes are in black color!
+
+### 5.2.1 VersionA
+
+```{r fig2versA}
+pDur <- treylevelplot(hatchduration) + NDpoint +
+labs(
+    y = "Hatching duration in days "
+  ) + theme(legend.position = "none") 
+
+pStart <- treylevelplot(hatchstart) + NDpoint + 
+  labs(
+    y = "Days until hatching start"
+  ) + theme(legend.position = "none")
+pPeak <- treylevelplot(hatchpeak) + NDpoint +
+  labs(
+    y = "Days until hatching peak"
+  ) + theme(legend.position = "none") 
+
+pEnd <- treylevelplot(hatchend) + NDpoint +
+  labs(
+    y = "Days until hatching end"
+  ) + theme(legend.position = "none") 
+
+
+ggarrange(pDur, pStart, pPeak, pEnd, ncol= 2, nrow = 2)
+#ggsave("Fig2mod.jpg", width = 60, height = 34, units = c("cm")) #optional to save out the image
+```
+
+## 5.3. Figure 3.
+
+This graph are will containing two plots in one: a) egg overwinter survival (pOW2) b) egg hatching percentages (pHatchR).
+
+## 5.3.1. Creating the a) part as the overwintering survival
+
+```{r}
+traytableNoND <- traytable %>%
+  filter(EggOrigin == "CSE") #ND eggs are exluded here
+
+pOW2 <- ggplot(traytableNoND, 
+            aes(DiapMonths, OverwintSurv)) +
+  geom_point(color = "black",  size = 8, position = "jitter") + 
+  geom_point(aes(y = OverwintSurvAvg), 
+             data = filter(survdata, EggOrigin == "ND"), 
+             color = "black", size = 12, shape = 18) +
+  scale_x_continuous(breaks = scalebreakx) + 
+  scale_y_continuous(labels = scales::percent_format(),
+                     breaks = c(0, 0.25, 0.50, 0.75 , 1.0)) +
+  theme(
+        legend.position = "none",  
+        text = element_text(size = 28, family = "arial"),
+        panel.background = element_rect(fill = NA),
+        panel.grid.major = element_line(colour = "grey80"),
+        axis.title.y = element_text(margin = margin(r = +20)),
+        axis.title.x = element_text(margin = margin(t = +20)), 
+        panel.border = element_rect(color = "black", fill = NA, size = 1),
+   axis.title=element_text(size = 36)) +
+   labs(x ="Months spent in diapause",
+        y = "Egg overwintering survival (%)",
+        color = "") +
+  expand_limits(y = 0)
+pOW2
+#ggsave("Fig3A.jpg", width = 50, height = 25, units = c("cm"))
+```
+
+## 5.3.2. Creating the b) part as the hatching percentages
+
+```{r}
+pHatchR <- treylevelplot(hatchratio) + NDpoint +
+  scale_y_continuous(labels = function(x) paste0(x*1, "%")) + 
+  theme(
+        text = element_text(size = 28, family = "arial"),
+        panel.background = element_rect(fill = NA),
+        panel.grid.major = element_line(colour = "grey80"),
+        axis.title.y = element_text(margin = margin(r = +20)),
+        axis.title.x = element_text(margin = margin(t = +20)), 
+        panel.border = element_rect(color = "black", fill = NA, size = 1),
+        legend.title = element_blank(),
+        legend.position = "none",
+        axis.text.y = element_text(size = 20),
+        axis.text.x = element_text(size = 20),
+        legend.key.width = unit(1.5, "cm"),
+        legend.key.height = unit(1, "cm"),
+        axis.title=element_text(size = 36)) +
+   labs(x ="Months spent in diapause",
+        y = "Egg hatching (%)",
+        color = "") +
+  expand_limits(y = 100)
+pHatchR
+#ggsave("Fig3B.jpg", width = 50, height = 25, units = c("cm")) #optional, for saving the image
+```
+
+## 5.3.3. Combining the two parts
+
+```{r}
+ggarrange(pOW2, pHatchR,
+          ncol = 1, nrow = 2)
+#ggsave("Fig3Comb.jpg", width = 50, height = 25, units = c("cm"))
+```
+
